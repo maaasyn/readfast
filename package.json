@@ -5,8 +5,8 @@
     "type": "module",
     "main": "dist/index.js",
     "bin": {
-        "readfast": "./dist/index.js",
-        "rdx": "./dist/index.js"
+        "readfast": "dist/index.js",
+        "rdx": "dist/index.js"
     },
     "scripts": {
         "build": "tsc",
