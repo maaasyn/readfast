@@ -1,0 +1,38 @@
+{
+    "name": "readfast",
+    "version": "1.0.0",
+    "description": "A reading helper that displays words with minimal eye movement using RSVP technique",
+    "type": "module",
+    "main": "dist/index.js",
+    "bin": {
+        "readfast": "./dist/index.js",
+        "rdx": "./dist/index.js"
+    },
+    "scripts": {
+        "build": "tsc",
+        "dev": "tsx src/index.ts",
+        "start": "node dist/index.js",
+        "install-cli": "pnpm run build && pnpm link --global",
+        "test": "vitest"
+    },
+    "keywords": [
+        "cli",
+        "reading",
+        "rsvp",
+        "speed-reading"
+    ],
+    "author": "Maaasyn",
+    "license": "UNLICENSED",
+    "dependencies": {
+        "chalk": "^5.6.2",
+        "commander": "^14.0.2",
+        "jszip": "^3.10.1",
+        "smol-toml": "^1.6.0"
+    },
+    "devDependencies": {
+        "@types/node": "^25.1.0",
+        "tsx": "^4.21.0",
+        "typescript": "^5.9.3",
+        "vitest": "^4.0.18"
+    }
+}

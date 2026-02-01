@@ -1,0 +1,24 @@
+# Readfast configuration example
+# Place this file at: ~/.config/readfast/config.toml (on Linux/macOS)
+# or your system's XDG_CONFIG_HOME/readfast/config.toml
+
+# Default reading speed (words per minute)
+speed = 300
+
+# Colors (use "default" for terminal default)
+# Supported colors: black, red, green, yellow, blue, magenta, cyan, white, and "default"
+pivot_color = "red"
+text_color = "default"
+
+# Display options
+zen = false
+minimal = false
+
+# Context window: show N words before and after (0 = off)
+context_window = 0
+
+# Delay before first word (milliseconds)
+initial_delay = 400
+
+# Delay multiplier for numbers (e.g. 2.0 = 2x normal duration)
+number_multiplier = 2.0
