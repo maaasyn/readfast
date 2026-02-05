@@ -1,5 +1,12 @@
 import chalk from "chalk";
-import { parseWord, isNumber } from "./utils.js";
+import { parseWord, isNumber, visibleWidth } from "./utils.js";
+import stripAnsi from "strip-ansi";
+
+// Helper to truncate string to specific width
+export function truncate(str: string, width: number): string {
+  if (str.length <= width) return str;
+  return str.slice(0, width);
+}
 
 export type ChapterInfo = {
   title: string | undefined;
@@ -64,7 +71,13 @@ function getORPIndexFromLength(length: number): number {
   return 4;
 }
 
-function getCurrentChapterIndex({ wordIndex, chapters }: { wordIndex: number; chapters: ChapterInfo[] }): number {
+function getCurrentChapterIndex({
+  wordIndex,
+  chapters,
+}: {
+  wordIndex: number;
+  chapters: ChapterInfo[];
+}): number {
   for (let i = chapters.length - 1; i >= 0; i--) {
     if (wordIndex >= chapters[i].startIndex) {
       return i;
@@ -108,13 +121,7 @@ type WordData = {
   isNumber: boolean;
 };
 
-export async function displayWords(
-  words: string[],
-  options: Partial<ReaderOptions> = {}
-): Promise<void> {
-  const opts = { ...DEFAULT_OPTIONS, ...options };
-  const maxWordLen = Math.max(...words.map((w) => w.length), 1);
-
+export function prepareWordData(words: string[]): WordData[] {
   const wordData: WordData[] = words.map((raw) => {
     const { leading, core, trailing } = parseWord(raw);
     let punctuationMultiplier = 0;
@@ -133,6 +140,207 @@ export async function displayWords(
       isNumber: isNumber(core), // Check if the core word is a number
     };
   });
+
+  return wordData;
+}
+
+export function isFooterVisible(termHeight: number, zen: boolean): boolean {
+  return !zen && termHeight >= 4;
+}
+
+export function renderFocusWord(
+  word: WordData,
+  options: Partial<ReaderOptions>,
+): string {
+  if (word.core.length === 0) {
+    return colorize(options.pivotColor || "red", word.raw);
+  }
+
+  const before = word.core.slice(0, word.orpIndex);
+  const pivot = word.core[word.orpIndex] || "";
+  const after = word.core.slice(word.orpIndex + 1);
+
+  return (
+    colorize(options.textColor || "default", word.leading) +
+    colorize(options.textColor || "default", before) +
+    colorize(options.pivotColor || "red", pivot) +
+    colorize(options.textColor || "default", after) +
+    colorize(options.textColor || "default", word.trailing)
+  );
+}
+
+export function renderWordLine(
+  index: number,
+  wordData: WordData[],
+  options: Partial<ReaderOptions>,
+  basePadding: number,
+): string {
+  const word = wordData[index];
+  const ctx = options.contextWindow || 0;
+
+  // No context: simple centered word
+  if (ctx === 0) {
+    const focusWord = renderFocusWord(word, options);
+    const leftPad = " ".repeat(
+      Math.max(0, basePadding - word.leading.length - word.orpIndex),
+    );
+    return leftPad + focusWord;
+  }
+
+  // With context: show surrounding words
+  const contextBefore: string[] = [];
+  const contextAfter: string[] = [];
+
+  for (let i = Math.max(0, index - ctx); i < index; i++) {
+    contextBefore.push(wordData[i].raw);
+  }
+  for (
+    let i = index + 1;
+    i <= Math.min(wordData.length - 1, index + ctx);
+    i++
+  ) {
+    contextAfter.push(wordData[i].raw);
+  }
+
+  const beforeText =
+    contextBefore.length > 0 ? chalk.dim(contextBefore.join(" ") + " ") : "";
+  const afterText =
+    contextAfter.length > 0 ? chalk.dim(" " + contextAfter.join(" ")) : "";
+  const focusWord = renderFocusWord(word, options);
+
+  // Calculate padding to keep focus word centered on its ORP
+  const beforeLen =
+    contextBefore.join(" ").length + (contextBefore.length > 0 ? 1 : 0);
+  const leftPad = " ".repeat(
+    Math.max(0, basePadding - beforeLen - word.leading.length - word.orpIndex),
+  );
+
+  return leftPad + beforeText + focusWord + afterText;
+}
+
+export type RenderedStatusBar = {
+  statusLine: string;
+  separator: string;
+};
+
+/**
+ * Build a single-line status bar that never exceeds `width`.
+ * Adds parts in priority order until it would overflow.
+ * Pads to exactly `width` columns to fully overwrite previous content.
+ */
+function joinFitMeta(
+  parts: string[],
+  width: number,
+  sep = "  ",
+  sidePadding = 0,
+): { line: string; kept: number } {
+  const pad = Math.max(0, sidePadding | 0);
+  const innerWidth = Math.max(0, width - pad * 2);
+
+  const out: string[] = [];
+  let used = 0;
+
+  for (const p of parts) {
+    const candidate = (out.length ? sep : "") + p;
+    const w = visibleWidth(candidate);
+    if (used + w > innerWidth) break;
+    out.push(p);
+    used += w;
+  }
+
+  let line = out.join(sep);
+
+  // Last-resort trim (should rarely trigger)
+  while (visibleWidth(line) > innerWidth) line = line.slice(0, -1);
+
+  // Pad inner so it overwrites any previous longer line
+  const innerPad = Math.max(0, innerWidth - visibleWidth(line));
+  const inner = line + " ".repeat(innerPad);
+
+  // Apply side padding
+  const side = " ".repeat(pad);
+  return { line: side + inner + side, kept: out.length };
+}
+
+function joinFit(
+  parts: string[],
+  width: number,
+  sep = "  ",
+  sidePadding = 0,
+): string {
+  return joinFitMeta(parts, width, sep, sidePadding).line;
+}
+
+/**
+ * Safer separator that won’t be “double width” in some terminals.
+ * If you really want box drawing, you can swap "-" with "─".
+ */
+function makeSeparator(width: number): string {
+  return chalk.dim("-".repeat(Math.max(0, width)));
+}
+
+export function getStatusBarData(
+  state: { index: number; paused: boolean; wpm: number; zen: boolean },
+  wordsCount: number,
+  options: { chapters?: { startIndex: number; title?: string }[] } = {},
+  width: number,
+  tapCount: number,
+): RenderedStatusBar {
+  // Guard
+  width = Math.max(0, width | 0);
+
+  const separator = makeSeparator(width);
+
+  // Priority tokens (build in order, highest priority first)
+  const stateIcon = state.paused ? "⏸" : "▶";
+  const stateColor = state.paused ? chalk.yellow : chalk.green;
+  const stateLabel = state.paused ? "PAUSED" : "PLAYING";
+
+  const wpmText =
+    tapCount > 0 ? `${state.wpm} wpm ♪${tapCount}` : `${state.wpm} wpm`;
+
+  const chaptersCount = options.chapters?.length ?? 0;
+
+  const iconToken = stateColor(stateIcon);
+  const labelToken = stateColor(stateLabel);
+  const wpmToken = chalk.cyan(wpmText);
+
+  const rest: string[] = [];
+  rest.push(chalk.dim("←/→: word  ↑/↓: wpm"));
+  rest.push(chalk.dim(`pos: ${state.index + 1}/${wordsCount}`));
+
+  // Shortcuts (human-readable; each is its own token so joinFit can drop them)
+  // Use a visible symbol for Space: "␠" (U+2420)
+  rest.push(chalk.dim("␠: pause"));
+  rest.push(chalk.dim("t: tempo"));
+  rest.push(chalk.dim("g: goto"));
+  if (chaptersCount > 1) rest.push(chalk.dim("b: chapters"));
+  if (!state.zen) rest.push(chalk.dim("z: zen"));
+  rest.push(chalk.dim("q: quit"));
+
+  // Base bar: icon + wpm + rest
+  const baseParts = [iconToken, wpmToken, ...rest];
+  const base = joinFitMeta(baseParts, width, "  ", 1);
+
+  // With label placed next to icon (NOT at the end).
+  // Only use it if it doesn't cause us to drop anything compared to the base line.
+  const labeledParts = [iconToken, labelToken, wpmToken, ...rest];
+  const labeled = joinFitMeta(labeledParts, width, "  ", 1);
+
+  const statusLine =
+    labeled.kept === labeledParts.length && labeled.kept >= base.kept
+      ? labeled.line
+      : base.line;
+
+  return { statusLine, separator };
+}
+
+export async function displayWords(
+  words: string[],
+  options: Partial<ReaderOptions> = {},
+): Promise<void> {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  const wordData = prepareWordData(words);
 
   const state: ReaderState = {
     index: Math.min(Math.max(0, opts.start), words.length - 1),
@@ -162,7 +370,8 @@ export async function displayWords(
       for (let i = 1; i < recentTaps.length; i++) {
         intervals.push(recentTaps[i] - recentTaps[i - 1]);
       }
-      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      const avgInterval =
+        intervals.reduce((a, b) => a + b, 0) / intervals.length;
       const calculatedWpm = Math.round(60000 / avgInterval);
       state.wpm = Math.max(50, Math.min(1000, calculatedWpm));
     }
@@ -296,11 +505,16 @@ export async function displayWords(
 
       // Arrow keys for navigation
       if (key.length === 3 && key[0] === 0x1b && key[1] === 0x5b) {
-        if (key[2] === 0x41) { // Up
+        if (key[2] === 0x41) {
+          // Up
           state.browseSelection = Math.max(0, state.browseSelection - 1);
           renderBrowseMode();
-        } else if (key[2] === 0x42) { // Down
-          state.browseSelection = Math.min(opts.chapters.length - 1, state.browseSelection + 1);
+        } else if (key[2] === 0x42) {
+          // Down
+          state.browseSelection = Math.min(
+            opts.chapters.length - 1,
+            state.browseSelection + 1,
+          );
           renderBrowseMode();
         }
       }
@@ -390,7 +604,10 @@ export async function displayWords(
     // B for chapter browser
     if ((keyStr === "b" || keyStr === "B") && opts.chapters.length > 1) {
       state.browseMode = true;
-      state.browseSelection = getCurrentChapterIndex({ wordIndex: state.index, chapters: opts.chapters });
+      state.browseSelection = getCurrentChapterIndex({
+        wordIndex: state.index,
+        chapters: opts.chapters,
+      });
       state.paused = true;
       renderBrowseMode();
       return;
@@ -436,87 +653,33 @@ export async function displayWords(
     process.stdin.on("data", handleKeypress);
   }
 
-  const renderFocusWord = (word: WordData) => {
-    if (word.core.length === 0) {
-      return colorize(opts.pivotColor, word.raw);
-    }
-
-    const before = word.core.slice(0, word.orpIndex);
-    const pivot = word.core[word.orpIndex] || "";
-    const after = word.core.slice(word.orpIndex + 1);
-
-    return (
-      colorize(opts.textColor, word.leading) +
-      colorize(opts.textColor, before) +
-      colorize(opts.pivotColor, pivot) +
-      colorize(opts.textColor, after) +
-      colorize(opts.textColor, word.trailing)
-    );
+  const renderFocusWordInner = (word: WordData) => {
+    return renderFocusWord(word, opts);
   };
 
-  const renderWordLine = (index: number) => {
-    const basePadding = getBasePadding();
-    const word = wordData[index];
-    const ctx = opts.contextWindow;
-
-    // No context: simple centered word
-    if (ctx === 0) {
-      const focusWord = renderFocusWord(word);
-      const leftPad = " ".repeat(
-        Math.max(0, basePadding - word.leading.length - word.orpIndex)
-      );
-      return leftPad + focusWord;
-    }
-
-    // With context: show surrounding words
-    const contextBefore: string[] = [];
-    const contextAfter: string[] = [];
-
-    for (let i = Math.max(0, index - ctx); i < index; i++) {
-      contextBefore.push(wordData[i].raw);
-    }
-    for (let i = index + 1; i <= Math.min(wordData.length - 1, index + ctx); i++) {
-      contextAfter.push(wordData[i].raw);
-    }
-
-    const beforeText = contextBefore.length > 0 ? chalk.dim(contextBefore.join(" ") + " ") : "";
-    const afterText = contextAfter.length > 0 ? chalk.dim(" " + contextAfter.join(" ")) : "";
-    const focusWord = renderFocusWord(word);
-
-    // Calculate padding to keep focus word centered on its ORP
-    const beforeLen = contextBefore.join(" ").length + (contextBefore.length > 0 ? 1 : 0);
-    const leftPad = " ".repeat(
-      Math.max(0, basePadding - beforeLen - word.leading.length - word.orpIndex)
-    );
-
-    return leftPad + beforeText + focusWord + afterText;
+  const renderWordLineInner = (index: number) => {
+    return renderWordLine(index, wordData, opts, getBasePadding());
   };
 
   const renderStatusBar = () => {
     const { width } = getTermDimensions();
-    const pauseIndicator = state.paused
-      ? chalk.yellow("⏸ PAUSED")
-      : chalk.green("▶ PLAYING");
-
-    const tapCount = getTapCount();
-    const wpmDisplay = tapCount > 0
-      ? chalk.magenta(`${state.wpm} wpm ♪${tapCount}`)
-      : chalk.cyan(`${state.wpm} wpm`);
-
-    const progress = `${state.index + 1}/${words.length}`;
-    const zenIndicator = state.zen ? "" : chalk.dim("  z: zen");
-    const browseHint = opts.chapters.length > 1 ? "  b: chapters" : "";
-    const legend = chalk.dim(`Space: pause  ←→: nav  ↑↓: speed  g: goto${browseHint}  q: quit`);
-
-    const statusLine = `${pauseIndicator}  ${wpmDisplay}  ${progress}${zenIndicator}`;
-    const separator = chalk.dim("─".repeat(width));
-
-    return { statusLine, legend, separator };
+    return getStatusBarData(
+      {
+        index: state.index,
+        paused: state.paused,
+        wpm: state.wpm,
+        zen: state.zen,
+      },
+      words.length,
+      opts,
+      width,
+      getTapCount(),
+    );
   };
 
   const render = () => {
     const { height: termHeight } = getTermDimensions();
-    const formattedLine = renderWordLine(state.index);
+    const formattedLine = renderWordLineInner(state.index);
 
     const writeLine = (row: number, text: string) => {
       if (lastFrame.get(row) === text) {
@@ -531,15 +694,31 @@ export async function displayWords(
       const wordRow = Math.floor(termHeight / 2);
       writeLine(wordRow, formattedLine);
 
-      if (!state.zen) {
-        const { statusLine, legend, separator } = renderStatusBar();
-        writeLine(termHeight - 2, separator);
-        writeLine(termHeight - 1, statusLine);
-        writeLine(termHeight, legend);
+      // Only show footer if there is enough vertical space
+      // We need at least 6 lines to show header (word) + footer without cramping/collision
+      // Word is at 50% height.
+      // If height=5, wordRow=2 (3rd line). Status=4, Legend=5.
+      // If height=4, wordRow=2. Status=3, Legend=4.
+      // Collision happens if wordRow >= termHeight - 2
+
+      const footerSafe = isFooterVisible(termHeight, state.zen);
+
+      if (footerSafe) {
+        const { statusLine, separator } = renderStatusBar();
+
+        // Show separator only if height >= 5
+        if (termHeight >= 5) {
+          writeLine(termHeight - 1, separator);
+          writeLine(termHeight, statusLine);
+        } else {
+          // Height == 4: status only, no separator
+          writeLine(termHeight, statusLine);
+        }
       } else {
-        writeLine(termHeight - 2, "");
-        writeLine(termHeight - 1, "");
-        writeLine(termHeight, "");
+        // Clear footer area if we're not showing it (e.g. switched to zen or small screen)
+        // If screen is small, these rows might not exist or might be the word row
+        if (termHeight - 1 > wordRow) writeLine(termHeight - 1, "");
+        if (termHeight > wordRow) writeLine(termHeight, "");
       }
     } else {
       // Minimal mode: just the word, nothing else
@@ -550,7 +729,10 @@ export async function displayWords(
   function renderBrowseMode() {
     const { width, height: termHeight } = getTermDimensions();
     const chapters = opts.chapters;
-    const currentChapter = getCurrentChapterIndex({ wordIndex: state.index, chapters });
+    const currentChapter = getCurrentChapterIndex({
+      wordIndex: state.index,
+      chapters,
+    });
 
     // Clear screen
     process.stdout.write("\x1B[2J\x1B[H");
@@ -566,7 +748,10 @@ export async function displayWords(
     const maxVisible = termHeight - 6;
     let startIdx = 0;
     if (chapters.length > maxVisible) {
-      startIdx = Math.max(0, state.browseSelection - Math.floor(maxVisible / 2));
+      startIdx = Math.max(
+        0,
+        state.browseSelection - Math.floor(maxVisible / 2),
+      );
       startIdx = Math.min(startIdx, chapters.length - maxVisible);
     }
     const endIdx = Math.min(startIdx + maxVisible, chapters.length);
@@ -589,7 +774,9 @@ export async function displayWords(
     }
 
     if (chapters.length > maxVisible) {
-      const scrollInfo = chalk.dim(`\n  ${startIdx + 1}-${endIdx} of ${chapters.length}`);
+      const scrollInfo = chalk.dim(
+        `\n  ${startIdx + 1}-${endIdx} of ${chapters.length}`,
+      );
       process.stdout.write(scrollInfo);
     }
   }
@@ -610,7 +797,7 @@ export async function displayWords(
     const separator = chalk.dim("─".repeat(width));
 
     process.stdout.write(`${title}\n`);
-    hints.forEach(h => process.stdout.write(h + "\n"));
+    hints.forEach((h) => process.stdout.write(h + "\n"));
     process.stdout.write(`${separator}\n\n`);
 
     const prompt = `  > ${state.gotoInput}█`;
@@ -675,7 +862,11 @@ export async function displayWords(
       const word = wordData[state.index];
       const baseDelay = 60000 / state.wpm;
       const delayMs = Math.floor(
-        baseDelay * (1 + word.punctuationMultiplier + word.lengthMultiplier + (word.isNumber ? opts.numberMultiplier! - 1 : 0))
+        baseDelay *
+          (1 +
+            word.punctuationMultiplier +
+            word.lengthMultiplier +
+            (word.isNumber ? opts.numberMultiplier! - 1 : 0)),
       );
 
       const result = await waitForDelayOrEvent(delayMs);

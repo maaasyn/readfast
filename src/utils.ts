@@ -1,3 +1,31 @@
+import stripAnsi from "strip-ansi";
+import stringWidth from "string-width";
+
+export function visibleWidth(s: string) {
+  return stringWidth(stripAnsi(s));
+}
+
+export function fitParts(parts: string[], width: number, sep = "  ") {
+  const out: string[] = [];
+  let used = 0;
+
+  for (const p of parts) {
+    const add = (out.length ? sep : "") + p;
+    const w = visibleWidth(add);
+    if (used + w > width) break;
+    out.push(p);
+    used += w;
+  }
+
+  let line = out.join(sep);
+
+  // Ensure it never exceeds width
+  while (visibleWidth(line) > width) {
+    line = line.slice(0, -1);
+  }
+  return line.padEnd(width, " ");
+}
+
 /**
  * Strip leading and trailing punctuation from a word.
  * Returns the core word and the leading/trailing punctuation.
